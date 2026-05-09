@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-game: "Baloo 2", "Nunito", "Comic Sans MS", cursive;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+  background: #eff6ff;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  color: #1e293b;
+  font-family: var(--font-game);
+}
+
+button {
+  font: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
