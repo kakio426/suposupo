@@ -105,3 +105,33 @@ Use for the focused quiz loop: progress, prompt, problem area, feedback, and fou
 Props: `attempt`, `masteryState`, `title`, `message`, `actions`, `children`.
 
 Use for result/reward screens. `masteryState` is `mastered`, `ready`, or `review`.
+
+## Week 5 Navigation Interfaces
+
+## `useLearningProgress`
+
+Returns: `progress`, `setProgress`, `saveProgress`, `authUser`, `authStatus`, `syncStatus`, `authMessage`, `handleSignIn`, `handleSignOut`, `hasLoadedProgress`, `isSupabaseConfigured`.
+
+Use for route-level screens that need the same localStorage and Supabase progress state.
+
+## Route Pages
+
+- `/`: student home plus existing quiz/result flow.
+- `/worlds`: full world map overview.
+- `/worlds/[worldId]`: world detail route. `addition` shows the Addition Forest map; other worlds show preview or locked detail.
+
+## Week 6 Play Route Interfaces
+
+## `AdditionPlaySession`
+
+Props: `level`, `onExit`, `onMap`.
+
+Use for the URL-addressable addition quiz loop. It owns level question generation, answer selection, 1-second feedback advance, attempt creation, progress update, localStorage persistence, and optional Supabase attempt/progress save.
+
+## `/play/[worldId]/[level]`
+
+Supported contract: `worldId="addition"` and numeric `level` from `1` to `30`.
+
+Fallbacks: unknown worlds and non-addition worlds show a safe preparation screen with a CTA to `/worlds`; invalid addition levels show a safe CTA to `/worlds/addition`.
+
+Navigation rule: home and world-detail start CTAs enter `/play/addition/{level}`; result CTAs route to the next level, the same level for review, `/worlds/addition`, or `/`.

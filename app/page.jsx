@@ -1,17 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ArrowRight,
   Check,
-  Flame,
-  Home,
   Leaf,
   Map,
-  RotateCcw,
-  ShieldCheck,
   Sparkles,
-  Star,
   X
 } from "lucide-react";
 import { FeedbackPanel } from "../components/quiz/FeedbackPanel";
@@ -19,11 +15,9 @@ import { QuizChoice } from "../components/quiz/QuizChoice";
 import { RecentRecord } from "../components/home/RecentRecord";
 import { SaveStatusPanel } from "../components/home/SaveStatusPanel";
 import { TodayPanel } from "../components/home/TodayPanel";
+import { AppBackground } from "../components/layout/AppBackground";
 import { QuizLayout, QuizPromptCard } from "../components/layout/QuizLayout";
-import { ResultLayout } from "../components/layout/ResultLayout";
 import { StudentShell } from "../components/layout/StudentShell";
-import { AdditionWorldMap, getNodeState } from "../components/world/AdditionWorldMap";
-import { LevelDetailPanel } from "../components/world/LevelDetailPanel";
 import { WorldCard } from "../components/world/WorldCard";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -31,258 +25,101 @@ import { Card } from "../components/ui/Card";
 import {
   ADDITION_PATH,
   MAX_LEVEL,
-  QUESTION_COUNT,
-  STORAGE_KEY,
   applyPlacementToProgress,
-  applyAttemptToProgress,
-  buildAttempt,
-  createInitialProgress,
   describeMistake,
-  evaluateAttempt,
   evaluatePlacement,
-  generateAdditionQuestions,
   generatePlacementQuestions,
-  getLevelMeta,
-  normalizeProgress
+  getLevelMeta
 } from "../lib/addition";
-import { isSupabaseConfigured, supabase } from "../lib/supabase";
+import { useLearningProgress } from "../lib/use-learning-progress";
 import {
-  migrateLocalProgressToSupabase,
-  saveAttemptToSupabase,
-  saveRemoteProgress
-} from "../lib/supabase-progress";
+  canOpenWorld,
+  getWorldProgressValue,
+  getWorldState
+} from "../lib/world-state";
 import { getWorldById } from "../lib/worlds";
 
 export default function MathApp() {
+  const router = useRouter();
   const [screen, setScreen] = useState("home");
-  const [progress, setProgress] = useState(createInitialProgress);
-  const [hasLoadedProgress, setHasLoadedProgress] = useState(false);
-  const [activeLevel, setActiveLevel] = useState(1);
-  const [selectedLevel, setSelectedLevel] = useState(null);
   const [questions, setQuestions] = useState([]);
-  const [quizMode, setQuizMode] = useState("level");
   const [currentIndex, setCurrentIndex] = useState(0);
   const [score, setScore] = useState(0);
   const [answerLog, setAnswerLog] = useState([]);
   const [selectedOption, setSelectedOption] = useState(null);
   const [isCorrect, setIsCorrect] = useState(null);
-  const [quizStartedAt, setQuizStartedAt] = useState(null);
   const [questionStartedAt, setQuestionStartedAt] = useState(null);
-  const [resultAttempt, setResultAttempt] = useState(null);
   const [placementResult, setPlacementResult] = useState(null);
-  const [authUser, setAuthUser] = useState(null);
-  const [authStatus, setAuthStatus] = useState("checking");
-  const [syncStatus, setSyncStatus] = useState("local");
-  const [authMessage, setAuthMessage] = useState("");
-
-  useEffect(() => {
-    const saved = window.localStorage.getItem(STORAGE_KEY);
-
-    if (saved) {
-      setProgress(normalizeProgress(JSON.parse(saved)));
-    }
-
-    setHasLoadedProgress(true);
-  }, []);
-
-  useEffect(() => {
-    if (!hasLoadedProgress) return;
-
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
-  }, [hasLoadedProgress, progress]);
-
-  useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) {
-      setAuthStatus("disabled");
-      setSyncStatus("local");
-      return;
-    }
-
-    let active = true;
-
-    supabase.auth.getSession().then(({ data }) => {
-      if (!active) return;
-
-      const user = data.session?.user || null;
-      setAuthUser(user);
-      setAuthStatus(user ? "authenticated" : "anonymous");
-      setSyncStatus(user ? "syncing" : "local");
-    });
-
-    const {
-      data: { subscription }
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      const user = session?.user || null;
-      setAuthUser(user);
-      setAuthStatus(user ? "authenticated" : "anonymous");
-      setSyncStatus(user ? "syncing" : "local");
-    });
-
-    return () => {
-      active = false;
-      subscription.unsubscribe();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!hasLoadedProgress || !authUser || !isSupabaseConfigured) return;
-
-    let cancelled = false;
-
-    async function syncInitialProgress() {
-      setAuthMessage("");
-      setSyncStatus("syncing");
-
-      const { progress: syncedProgress, error } =
-        await migrateLocalProgressToSupabase(authUser.id, progress);
-
-      if (cancelled) return;
-
-      if (error) {
-        setAuthMessage("서버 저장을 확인하지 못해서 로컬 기록으로 계속할게요.");
-        setSyncStatus("error");
-        return;
-      }
-
-      setProgress(syncedProgress);
-      setSyncStatus("synced");
-    }
-
-    syncInitialProgress();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [hasLoadedProgress, authUser?.id]);
+  const {
+    authMessage,
+    authStatus,
+    handleSignIn,
+    handleSignOut,
+    hasLoadedProgress,
+    isSupabaseConfigured,
+    progress,
+    saveProgress,
+    authUser,
+    syncStatus
+  } = useLearningProgress();
 
   const completedCount = progress.completedLevels.length;
   const progressPercent = Math.round((completedCount / MAX_LEVEL) * 100);
   const currentLevelMeta = getLevelMeta(progress.currentLevel);
   const activeWorld = getWorldById("addition");
 
-  const openMap = () => {
-    setSelectedLevel(progress.currentLevel);
-    setScreen("map");
+  const openWorld = (worldId) => {
+    router.push(`/worlds/${worldId}`);
   };
 
-  const startLevel = (level) => {
-    const safeLevel = Math.min(
-      Math.max(1, level),
-      progress.highestUnlockedLevel
-    );
-
-    setActiveLevel(safeLevel);
-    setSelectedLevel(null);
-    setQuizMode("level");
-    setQuestions(generateAdditionQuestions(safeLevel, QUESTION_COUNT));
-    setCurrentIndex(0);
-    setScore(0);
-    setAnswerLog([]);
-    setSelectedOption(null);
-    setIsCorrect(null);
-    setResultAttempt(null);
-    setQuizStartedAt(Date.now());
-    setQuestionStartedAt(Date.now());
-    setScreen("quiz");
+  const openMap = () => {
+    openWorld("addition");
   };
 
   const startPlacement = () => {
-    setActiveLevel(1);
-    setSelectedLevel(null);
-    setQuizMode("placement");
     setQuestions(generatePlacementQuestions());
     setCurrentIndex(0);
     setScore(0);
     setAnswerLog([]);
     setSelectedOption(null);
     setIsCorrect(null);
-    setResultAttempt(null);
     setPlacementResult(null);
-    setQuizStartedAt(Date.now());
     setQuestionStartedAt(Date.now());
     setScreen("quiz");
   };
 
-  const handleSignIn = async () => {
-    if (!isSupabaseConfigured || !supabase) {
-      setAuthMessage(".env.local에 Supabase URL과 key를 넣으면 로그인을 켤 수 있어요.");
-      return;
+  useEffect(() => {
+    if (!hasLoadedProgress || screen !== "home") return;
+
+    const params = new URLSearchParams(window.location.search);
+    const startLevelParam = params.get("startLevel");
+    const startLevelNumber = Number(startLevelParam);
+
+    if (!startLevelParam) return;
+
+    window.history.replaceState(null, "", "/");
+    if (
+      Number.isInteger(startLevelNumber) &&
+      startLevelNumber >= 1 &&
+      startLevelNumber <= MAX_LEVEL
+    ) {
+      router.replace(`/play/addition/${startLevelNumber}`);
     }
-
-    setAuthMessage("");
-
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: {
-        redirectTo: window.location.origin
-      }
-    });
-
-    if (error) {
-      setAuthMessage("Google 로그인을 시작하지 못했어요. Supabase 설정을 확인해 주세요.");
-    }
-  };
-
-  const handleSignOut = async () => {
-    if (!isSupabaseConfigured || !supabase) return;
-
-    await supabase.auth.signOut();
-    setAuthUser(null);
-    setAuthStatus("anonymous");
-    setSyncStatus("local");
-    setAuthMessage("");
-  };
+  }, [hasLoadedProgress, screen]);
 
   const finishAttempt = (finalScore, finalAnswers) => {
-    if (quizMode === "placement") {
-      const placement = evaluatePlacement(finalAnswers);
-      const updatedProgress = applyPlacementToProgress(progress, placement);
+    const placement = evaluatePlacement(finalAnswers);
+    const updatedProgress = applyPlacementToProgress(progress, placement);
 
-      setPlacementResult({
-        ...placement,
-        score: finalScore,
-        total: questions.length
-      });
-      setProgress(updatedProgress);
-      if (authUser) {
-        saveRemoteProgress(authUser.id, updatedProgress).then(({ error }) => {
-          if (error) {
-            setAuthMessage("진단 결과를 서버에 저장하지 못했어요. 로컬에는 저장됐어요.");
-            setSyncStatus("error");
-          } else {
-            setSyncStatus("synced");
-          }
-        });
-      }
-      setScreen("placement-result");
-      return;
-    }
-
-    const attempt = buildAttempt({
-      level: activeLevel,
+    setPlacementResult({
+      ...placement,
       score: finalScore,
-      total: questions.length,
-      durationMs: Date.now() - quizStartedAt,
-      answers: finalAnswers
+      total: questions.length
     });
-    const updatedProgress = applyAttemptToProgress(progress, attempt);
-
-    setResultAttempt(attempt);
-    setProgress(updatedProgress);
-    if (authUser) {
-      Promise.all([
-        saveRemoteProgress(authUser.id, updatedProgress),
-        saveAttemptToSupabase(authUser.id, attempt)
-      ]).then((results) => {
-        if (results.some((result) => result.error)) {
-          setAuthMessage("풀이 기록 일부를 서버에 저장하지 못했어요. 로컬 기록은 유지돼요.");
-          setSyncStatus("error");
-        } else {
-          setSyncStatus("synced");
-        }
-      });
-    }
-    setScreen("result");
+    saveProgress(updatedProgress, {
+      errorMessage: "진단 결과를 서버에 저장하지 못했어요. 로컬에는 저장됐어요."
+    });
+    setScreen("placement-result");
   };
 
   const handleSelectOption = (option) => {
@@ -324,7 +161,7 @@ export default function MathApp() {
   };
 
   return (
-    <main className="min-h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,#fef3c7_0,#dbeafe_34%,#dcfce7_70%,#f8fafc_100%)] font-game text-slate-900">
+    <AppBackground>
       {screen === "home" && (
         <HomeView
           activeWorld={activeWorld}
@@ -335,32 +172,23 @@ export default function MathApp() {
           currentLevelMeta={currentLevelMeta}
           isSupabaseConfigured={isSupabaseConfigured}
           onOpenMap={openMap}
+          onOpenWorld={openWorld}
           onSignIn={handleSignIn}
           onSignOut={handleSignOut}
           onStartPlacement={startPlacement}
-          onStart={() => startLevel(progress.currentLevel)}
+          onStart={() => router.push(`/play/addition/${progress.currentLevel}`)}
           progress={progress}
           progressPercent={progressPercent}
           syncStatus={syncStatus}
         />
       )}
 
-      {screen === "map" && (
-        <SkillMapView
-          onBack={() => setScreen("home")}
-          onSelectLevel={setSelectedLevel}
-          onStartLevel={startLevel}
-          progress={progress}
-          selectedLevel={selectedLevel}
-        />
-      )}
-
       {screen === "quiz" && questions.length > 0 && (
         <QuizView
-          activeLevel={activeLevel}
+          activeLevel={1}
           currentIndex={currentIndex}
           isCorrect={isCorrect}
-          mode={quizMode}
+          mode="placement"
           onExit={() => setScreen("home")}
           onSelectOption={handleSelectOption}
           question={questions[currentIndex]}
@@ -369,24 +197,14 @@ export default function MathApp() {
         />
       )}
 
-      {screen === "result" && resultAttempt && (
-        <ResultView
-          attempt={resultAttempt}
-          onDashboard={() => setScreen("home")}
-          onMap={openMap}
-          onNextLevel={() => startLevel(Math.min(activeLevel + 1, MAX_LEVEL))}
-          onRetry={() => startLevel(activeLevel)}
-        />
-      )}
-
       {screen === "placement-result" && placementResult && (
         <PlacementResultView
           onOpenMap={openMap}
-          onStart={() => startLevel(placementResult.level)}
+          onStart={() => router.push(`/play/addition/${placementResult.level}`)}
           result={placementResult}
         />
       )}
-    </main>
+    </AppBackground>
   );
 }
 
@@ -399,6 +217,7 @@ function HomeView({
   currentLevelMeta,
   isSupabaseConfigured,
   onOpenMap,
+  onOpenWorld,
   onSignIn,
   onSignOut,
   onStartPlacement,
@@ -475,13 +294,13 @@ function HomeView({
           <RecentRecord recentAttempt={recentAttempt} />
         </div>
 
-        <WorldPreviewRail onOpenMap={onOpenMap} progress={progress} />
+        <WorldPreviewRail onOpenWorld={onOpenWorld} progress={progress} />
       </div>
     </StudentShell>
   );
 }
 
-function WorldPreviewRail({ onOpenMap, progress }) {
+function WorldPreviewRail({ onOpenWorld, progress }) {
   const previewWorlds = ["addition", "shapes", "subtraction"]
     .map((id) => getWorldById(id))
     .filter(Boolean);
@@ -515,7 +334,11 @@ function WorldPreviewRail({ onOpenMap, progress }) {
             return (
               <WorldCard
                 key={world.id}
-                onSelect={world.id === "addition" ? onOpenMap : undefined}
+                onSelect={
+                  canOpenWorld(world, state)
+                    ? () => onOpenWorld(world.id)
+                    : undefined
+                }
                 progressValue={getWorldProgressValue(world, progress)}
                 state={state}
                 world={world}
@@ -525,49 +348,6 @@ function WorldPreviewRail({ onOpenMap, progress }) {
         </div>
       </Card>
     </section>
-  );
-}
-
-function SkillMapView({
-  onBack,
-  onSelectLevel,
-  onStartLevel,
-  progress,
-  selectedLevel
-}) {
-  const selectedMeta = selectedLevel ? getLevelMeta(selectedLevel) : null;
-  const selectedState = selectedLevel
-    ? getNodeState(selectedLevel, progress)
-    : "open";
-
-  return (
-    <StudentShell
-      badge={
-        <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/90 text-emerald-500 shadow-md">
-          <Leaf className="h-7 w-7" />
-        </div>
-      }
-      eyebrow="Skill Tree"
-      maxWidth="lg"
-      onBack={onBack}
-      title="숲길 지도"
-    >
-      {selectedLevel && selectedMeta && (
-        <LevelDetailPanel
-          level={selectedLevel}
-          meta={selectedMeta}
-          onClose={() => onSelectLevel(null)}
-          onStart={onStartLevel}
-          state={selectedState}
-        />
-      )}
-
-      <AdditionWorldMap
-        onSelectLevel={onSelectLevel}
-        progress={progress}
-        selectedLevel={selectedLevel}
-      />
-    </StudentShell>
   );
 }
 
@@ -694,121 +474,6 @@ function PlacementResultView({ onOpenMap, onStart, result }) {
   );
 }
 
-function ResultView({ attempt, onDashboard, onMap, onNextLevel, onRetry }) {
-  const feedback = useMemo(
-    () => evaluateAttempt(attempt.score, attempt.total),
-    [attempt.score, attempt.total]
-  );
-  const wrongAnswers = attempt.answers.filter((answer) => !answer.isCorrect);
-  const firstWeakPoint = wrongAnswers[0];
-  const levelMeta = getLevelMeta(attempt.level);
-  const reachedFinalLevel = attempt.level >= MAX_LEVEL;
-  const masteryState = getMasteryState(feedback.tone, attempt.canAdvance);
-
-  return (
-    <ResultLayout
-      actions={
-        <>
-          {attempt.canAdvance && !reachedFinalLevel ? (
-            <Button
-              iconRight={<ArrowRight className="h-6 w-6" />}
-              onClick={onNextLevel}
-            >
-              다음 레벨 도전하기
-            </Button>
-          ) : (
-            <Button
-              iconRight={<RotateCcw className="h-6 w-6" />}
-              onClick={onRetry}
-              tone="warm"
-            >
-              비슷한 문제 다시 풀기
-            </Button>
-          )}
-
-          <Button
-            iconLeft={<Map className="h-6 w-6" />}
-            onClick={onMap}
-            tone="neutral"
-            variant="secondary"
-          >
-            숲길 지도 보기
-          </Button>
-
-          <Button
-            iconLeft={<Home className="h-5 w-5" />}
-            onClick={onDashboard}
-            size="md"
-            tone="neutral"
-            variant="quiet"
-          >
-            홈으로 돌아가기
-          </Button>
-        </>
-      }
-      attempt={attempt}
-      masteryState={masteryState}
-      message={feedback.message}
-      title={feedback.title}
-    >
-      <div className="my-7 rounded-[1.6rem] bg-slate-50 p-5">
-        <div className="mb-3 text-6xl font-black text-emerald-500">
-          {attempt.score}
-          <span className="text-3xl text-slate-300"> / {attempt.total}</span>
-        </div>
-        <div className="flex justify-center gap-1">
-          {Array.from({ length: attempt.total }, (_, index) => (
-            <Star
-              className={`h-8 w-8 ${
-                index < attempt.score
-                  ? "fill-amber-300 text-amber-300"
-                  : "fill-slate-200 text-slate-200"
-              }`}
-              key={index}
-            />
-          ))}
-        </div>
-      </div>
-
-      <div className="space-y-3 text-left">
-        <ResultNote
-          icon={<ShieldCheck className="h-6 w-6" />}
-          label="잘한 부분"
-          text={feedback.strength}
-        />
-        <ResultNote
-          icon={<Flame className="h-6 w-6" />}
-          label="다음 행동"
-          text={feedback.next}
-        />
-        <ResultNote
-          icon={<Sparkles className="h-6 w-6" />}
-          label="오늘의 감각"
-          text={
-            firstWeakPoint
-              ? `${levelMeta.focus}에서 '${firstWeakPoint.mistakeType}'를 한 번 만났어요.`
-              : `${levelMeta.focus} 감각이 아주 안정적이에요.`
-          }
-        />
-      </div>
-    </ResultLayout>
-  );
-}
-
-function ResultNote({ icon, label, text }) {
-  return (
-    <div className="flex gap-3 rounded-2xl bg-white p-4 shadow-sm">
-      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-600">
-        {icon}
-      </div>
-      <div>
-        <p className="text-sm font-black text-slate-400">{label}</p>
-        <p className="text-base font-black leading-snug text-slate-700">{text}</p>
-      </div>
-    </div>
-  );
-}
-
 function StatCard({ label, value }) {
   return (
     <div className="rounded-[1.4rem] bg-white/82 p-4 text-center shadow-lg backdrop-blur">
@@ -816,29 +481,4 @@ function StatCard({ label, value }) {
       <p className="text-2xl font-black text-slate-900">{value}</p>
     </div>
   );
-}
-
-function getWorldState(world, progress) {
-  if (world.id === "addition") {
-    return progress.completedLevels.length >= MAX_LEVEL ? "completed" : "current";
-  }
-
-  if (world.unlockState === "bonus-open") return "preview";
-  if (world.unlockState === "locked") return "locked";
-  if (world.unlockState === "open") return "open";
-
-  return "preview";
-}
-
-function getWorldProgressValue(world, progress) {
-  if (world.id === "addition") return `진행 Lv.${progress.currentLevel}`;
-  if (world.unlockState === "bonus-open") return "맛보기 준비";
-  if (world.unlockState === "locked") return "잠김";
-  return "열림";
-}
-
-function getMasteryState(tone, canAdvance) {
-  if (tone === "perfect") return "mastered";
-  if (canAdvance) return "ready";
-  return "review";
 }
