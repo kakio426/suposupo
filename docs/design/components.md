@@ -142,6 +142,8 @@ Navigation rule: home and world-detail start CTAs enter `/play/addition/{level}`
 
 Optional data contract for concrete learning models. The first supported type is `ten-frame` with `totalSlots`, `filledSlots`, and `missingSlots`.
 
+Week 8 adds `carry-blocks` for two-digit addition with carrying. It includes addends, ones-place carry details, tens-place carried value, and final total.
+
 ## `TenFrameModel`
 
 Props: `filledSlots`, `missingSlots`, `totalSlots`, `state`, `label`.
@@ -153,3 +155,9 @@ Use for `make_10` questions in addition levels and placement. It is a visual aid
 Props: `question`, `answered`, `isCorrect`.
 
 Use as the quiz-level switchboard for optional concrete models. It renders nothing when a question has no `visualModel`.
+
+## `CarryBlocksModel`
+
+Props: `model`, `state`, `label`.
+
+Use for `two_digit_with_carry` questions in addition levels and placement. It visualizes ones-place regrouping into a carried tens-place block while keeping answer selection four-choice.
