@@ -29,8 +29,10 @@ import {
   describeMistake,
   evaluatePlacement,
   generatePlacementQuestions,
+  getRepairHint,
   getLevelMeta
 } from "../lib/addition";
+import { ManipulativeStage } from "../components/learning/ManipulativeStage";
 import { useLearningProgress } from "../lib/use-learning-progress";
 import {
   canOpenWorld,
@@ -407,13 +409,20 @@ function QuizView({
                 <X className="h-6 w-6" />
               )
             }
-            message={isCorrect ? "" : "초록 조각을 보고 다음에 비교해요."}
+            message={isCorrect ? "" : getRepairHint(question)}
             title={isCorrect ? "좋아요, 정답!" : "괜찮아요, 정답을 확인해요"}
             tone={isCorrect ? "success" : "repair"}
           />
         )
       }
       levelLabel={`${currentIndex + 1}/${questionCount}`}
+      manipulative={
+        <ManipulativeStage
+          answered={answered}
+          isCorrect={isCorrect}
+          question={question}
+        />
+      }
       onExit={onExit}
       progress={progress}
       prompt={question.prompt}

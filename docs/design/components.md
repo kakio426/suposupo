@@ -96,7 +96,7 @@ Use as the pre-quiz confidence gate after selecting a world-map node.
 
 ## `QuizLayout`
 
-Props: `progress`, `levelLabel`, `prompt`, `feedback`, `onExit`, `children`, `choices`.
+Props: `progress`, `levelLabel`, `prompt`, `feedback`, `manipulative`, `onExit`, `children`, `choices`.
 
 Use for the focused quiz loop: progress, prompt, problem area, feedback, and four-choice answer grid.
 
@@ -135,3 +135,21 @@ Supported contract: `worldId="addition"` and numeric `level` from `1` to `30`.
 Fallbacks: unknown worlds and non-addition worlds show a safe preparation screen with a CTA to `/worlds`; invalid addition levels show a safe CTA to `/worlds/addition`.
 
 Navigation rule: home and world-detail start CTAs enter `/play/addition/{level}`; result CTAs route to the next level, the same level for review, `/worlds/addition`, or `/`.
+
+## Week 7 Learning Models
+
+## `question.visualModel`
+
+Optional data contract for concrete learning models. The first supported type is `ten-frame` with `totalSlots`, `filledSlots`, and `missingSlots`.
+
+## `TenFrameModel`
+
+Props: `filledSlots`, `missingSlots`, `totalSlots`, `state`, `label`.
+
+Use for `make_10` questions in addition levels and placement. It is a visual aid only; answer selection remains four-choice.
+
+## `ManipulativeStage`
+
+Props: `question`, `answered`, `isCorrect`.
+
+Use as the quiz-level switchboard for optional concrete models. It renders nothing when a question has no `visualModel`.

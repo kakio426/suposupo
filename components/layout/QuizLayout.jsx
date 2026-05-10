@@ -10,6 +10,7 @@ export function QuizLayout({
   choices = null,
   feedback = null,
   levelLabel,
+  manipulative = null,
   onExit,
   progress,
   prompt
@@ -34,6 +35,8 @@ export function QuizLayout({
         </div>
 
         {children}
+
+        {manipulative}
 
         <div className="mt-5 min-h-12 text-center">{feedback}</div>
       </div>
