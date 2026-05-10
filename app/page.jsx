@@ -20,6 +20,13 @@ import {
   Trophy,
   X
 } from "lucide-react";
+import { FeedbackPanel } from "../components/quiz/FeedbackPanel";
+import { QuizChoice } from "../components/quiz/QuizChoice";
+import { Badge } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { Card } from "../components/ui/Card";
+import { IconButton } from "../components/ui/IconButton";
+import { ProgressBar } from "../components/ui/ProgressBar";
 import {
   ADDITION_LEVELS,
   ADDITION_PATH,
@@ -38,7 +45,13 @@ import {
   getLevelMeta,
   normalizeProgress
 } from "../lib/addition";
-import { WORLD_CATALOG, WORLD_CATEGORIES, getWorldById } from "../lib/worlds";
+import { isSupabaseConfigured, supabase } from "../lib/supabase";
+import {
+  migrateLocalProgressToSupabase,
+  saveAttemptToSupabase,
+  saveRemoteProgress
+} from "../lib/supabase-progress";
+import { getWorldById } from "../lib/worlds";
 
 const NODE_OFFSETS = [
   "ml-2",
@@ -65,6 +78,10 @@ export default function MathApp() {
   const [questionStartedAt, setQuestionStartedAt] = useState(null);
   const [resultAttempt, setResultAttempt] = useState(null);
   const [placementResult, setPlacementResult] = useState(null);
+  const [authUser, setAuthUser] = useState(null);
+  const [authStatus, setAuthStatus] = useState("checking");
+  const [syncStatus, setSyncStatus] = useState("local");
+  const [authMessage, setAuthMessage] = useState("");
 
   useEffect(() => {
     const saved = window.localStorage.getItem(STORAGE_KEY);
@@ -81,6 +98,70 @@ export default function MathApp() {
 
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
   }, [hasLoadedProgress, progress]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) {
+      setAuthStatus("disabled");
+      setSyncStatus("local");
+      return;
+    }
+
+    let active = true;
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (!active) return;
+
+      const user = data.session?.user || null;
+      setAuthUser(user);
+      setAuthStatus(user ? "authenticated" : "anonymous");
+      setSyncStatus(user ? "syncing" : "local");
+    });
+
+    const {
+      data: { subscription }
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      const user = session?.user || null;
+      setAuthUser(user);
+      setAuthStatus(user ? "authenticated" : "anonymous");
+      setSyncStatus(user ? "syncing" : "local");
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasLoadedProgress || !authUser || !isSupabaseConfigured) return;
+
+    let cancelled = false;
+
+    async function syncInitialProgress() {
+      setAuthMessage("");
+      setSyncStatus("syncing");
+
+      const { progress: syncedProgress, error } =
+        await migrateLocalProgressToSupabase(authUser.id, progress);
+
+      if (cancelled) return;
+
+      if (error) {
+        setAuthMessage("서버 저장을 확인하지 못해서 로컬 기록으로 계속할게요.");
+        setSyncStatus("error");
+        return;
+      }
+
+      setProgress(syncedProgress);
+      setSyncStatus("synced");
+    }
+
+    syncInitialProgress();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasLoadedProgress, authUser?.id]);
 
   const completedCount = progress.completedLevels.length;
   const progressPercent = Math.round((completedCount / MAX_LEVEL) * 100);
@@ -123,16 +204,57 @@ export default function MathApp() {
     setScreen("quiz");
   };
 
+  const handleSignIn = async () => {
+    if (!isSupabaseConfigured || !supabase) {
+      setAuthMessage(".env.local에 Supabase URL과 key를 넣으면 로그인을 켤 수 있어요.");
+      return;
+    }
+
+    setAuthMessage("");
+
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: window.location.origin
+      }
+    });
+
+    if (error) {
+      setAuthMessage("Google 로그인을 시작하지 못했어요. Supabase 설정을 확인해 주세요.");
+    }
+  };
+
+  const handleSignOut = async () => {
+    if (!isSupabaseConfigured || !supabase) return;
+
+    await supabase.auth.signOut();
+    setAuthUser(null);
+    setAuthStatus("anonymous");
+    setSyncStatus("local");
+    setAuthMessage("");
+  };
+
   const finishAttempt = (finalScore, finalAnswers) => {
     if (quizMode === "placement") {
       const placement = evaluatePlacement(finalAnswers);
+      const updatedProgress = applyPlacementToProgress(progress, placement);
 
       setPlacementResult({
         ...placement,
         score: finalScore,
         total: questions.length
       });
-      setProgress((previous) => applyPlacementToProgress(previous, placement));
+      setProgress(updatedProgress);
+      if (authUser) {
+        saveRemoteProgress(authUser.id, updatedProgress).then(({ error }) => {
+          if (error) {
+            setAuthMessage("진단 결과를 서버에 저장하지 못했어요. 로컬에는 저장됐어요.");
+            setSyncStatus("error");
+          } else {
+            setSyncStatus("synced");
+          }
+        });
+      }
       setScreen("placement-result");
       return;
     }
@@ -144,9 +266,23 @@ export default function MathApp() {
       durationMs: Date.now() - quizStartedAt,
       answers: finalAnswers
     });
+    const updatedProgress = applyAttemptToProgress(progress, attempt);
 
     setResultAttempt(attempt);
-    setProgress((previous) => applyAttemptToProgress(previous, attempt));
+    setProgress(updatedProgress);
+    if (authUser) {
+      Promise.all([
+        saveRemoteProgress(authUser.id, updatedProgress),
+        saveAttemptToSupabase(authUser.id, attempt)
+      ]).then((results) => {
+        if (results.some((result) => result.error)) {
+          setAuthMessage("풀이 기록 일부를 서버에 저장하지 못했어요. 로컬 기록은 유지돼요.");
+          setSyncStatus("error");
+        } else {
+          setSyncStatus("synced");
+        }
+      });
+    }
     setScreen("result");
   };
 
@@ -195,14 +331,21 @@ export default function MathApp() {
 
       {screen === "home" && (
         <HomeView
+          activeWorld={activeWorld}
+          authMessage={authMessage}
+          authStatus={authStatus}
+          authUser={authUser}
           completedCount={completedCount}
           currentLevelMeta={currentLevelMeta}
-          activeWorld={activeWorld}
+          isSupabaseConfigured={isSupabaseConfigured}
           onOpenMap={() => setScreen("map")}
+          onSignIn={handleSignIn}
+          onSignOut={handleSignOut}
           onStartPlacement={startPlacement}
           onStart={() => startLevel(progress.currentLevel)}
           progress={progress}
           progressPercent={progressPercent}
+          syncStatus={syncStatus}
         />
       )}
 
@@ -251,165 +394,266 @@ export default function MathApp() {
 
 function HomeView({
   activeWorld,
+  authMessage,
+  authStatus,
+  authUser,
   completedCount,
   currentLevelMeta,
+  isSupabaseConfigured,
   onOpenMap,
+  onSignIn,
+  onSignOut,
   onStartPlacement,
   onStart,
   progress,
-  progressPercent
+  progressPercent,
+  syncStatus
 }) {
   const recentAttempt = progress.recentAttempts[0];
 
   return (
-    <section className="relative mx-auto flex min-h-screen w-full max-w-md flex-col px-6 py-8">
-      <header className="mb-8 flex items-center justify-between">
+    <section className="relative mx-auto min-h-screen w-full max-w-5xl px-5 py-8 sm:px-6 lg:px-8">
+      <header className="mx-auto mb-8 flex max-w-md items-center justify-between lg:max-w-none">
         <div>
           <p className="text-sm font-black uppercase tracking-[0.28em] text-emerald-600">
             {ADDITION_PATH.englishTitle}
           </p>
-          <h1 className="text-5xl font-black leading-tight text-slate-950">
+          <h1 className="font-display text-5xl font-black leading-tight text-slate-950">
             {activeWorld.title}
           </h1>
         </div>
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white shadow-jelly">
+        <div className="flex h-14 w-14 items-center justify-center rounded-button bg-white shadow-jelly">
           <Leaf className="h-8 w-8 text-emerald-500" />
         </div>
       </header>
 
-      <div className="rounded-[2rem] border-4 border-white bg-white/84 p-6 shadow-jelly backdrop-blur">
-        <div className="mb-6 rounded-[1.6rem] bg-gradient-to-br from-emerald-100 via-lime-100 to-sky-100 p-5">
-          <div className="mb-5 flex flex-wrap items-center gap-3">
-            <span className="rounded-full bg-white px-4 py-2 text-lg font-black text-emerald-700 shadow-sm">
-              {progress.placementCompleted
-                ? `이어하기 Lv. ${progress.currentLevel}`
-                : "처음이라면 진단부터"}
-            </span>
-            <span className="rounded-full bg-emerald-500 px-4 py-2 text-sm font-black text-white shadow-sm">
-              {QUESTION_COUNT}문제
-            </span>
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,430px)_minmax(0,1fr)] lg:items-start">
+        <div className="mx-auto w-full max-w-md lg:mx-0">
+          <TodayPanel
+            currentLevelMeta={currentLevelMeta}
+            onOpenMap={onOpenMap}
+            onStart={onStart}
+            onStartPlacement={onStartPlacement}
+            progress={progress}
+          />
+
+          <div className="mt-5 grid grid-cols-3 gap-3">
+            <StatCard label="완료" value={`${completedCount}/${MAX_LEVEL}`} />
+            <StatCard
+              label="열린 길"
+              value={`Lv.${progress.highestUnlockedLevel}`}
+            />
+            <StatCard label="진도" value={`${progressPercent}%`} />
           </div>
-          <h2 className="mb-3 text-3xl font-black text-slate-950">
-            {currentLevelMeta.title}
-          </h2>
-          <p className="text-lg font-bold leading-relaxed text-slate-600">
-            {progress.placementCompleted
-              ? `${currentLevelMeta.focus}을 게임처럼 톡톡 풀어봐요.`
-              : "몇 학년인지는 묻지 않고, 짧은 진단으로 지금 맞는 숲길을 찾아요."}{" "}
-            학년 표시는 숨기고, 지금 필요한 숫자 감각만 키워요.
-          </p>
+
+          <AuthPanel
+            authMessage={authMessage}
+            authStatus={authStatus}
+            authUser={authUser}
+            isSupabaseConfigured={isSupabaseConfigured}
+            onSignIn={onSignIn}
+            onSignOut={onSignOut}
+            syncStatus={syncStatus}
+          />
+
+          <RecentRecord recentAttempt={recentAttempt} />
         </div>
 
-        <button
-          className="flex w-full items-center justify-center gap-3 rounded-3xl border-b-[7px] border-emerald-700 bg-emerald-500 px-6 py-5 text-2xl font-black text-white shadow-lg transition-all hover:bg-emerald-400 active:translate-y-1 active:border-b-2 active:scale-95"
-          onClick={onStart}
-          type="button"
-        >
-          {progress.placementCompleted ? "이어서 시작하기" : "Lv.1부터 시작하기"}
-          <Play className="h-7 w-7 fill-white" />
-        </button>
-
-        {!progress.placementCompleted && (
-          <button
-            className="mt-3 flex w-full items-center justify-center gap-3 rounded-3xl border-b-[7px] border-amber-600 bg-amber-300 px-6 py-5 text-xl font-black text-amber-950 shadow-lg transition-all hover:bg-amber-200 active:translate-y-1 active:border-b-2 active:scale-95"
-            onClick={onStartPlacement}
-            type="button"
-          >
-            1분 진단으로 맞춤 시작
-            <Sparkles className="h-6 w-6" />
-          </button>
-        )}
-
-        <button
-          className="mt-3 flex w-full items-center justify-center gap-3 rounded-3xl border-b-[7px] border-slate-300 bg-white px-6 py-5 text-xl font-black text-slate-700 shadow-md transition-all hover:bg-slate-50 active:translate-y-1 active:border-b-2 active:scale-95"
-          onClick={onOpenMap}
-          type="button"
-        >
-          숲길 지도 보기
-          <Map className="h-6 w-6" />
-        </button>
-      </div>
-
-      <div className="mt-5 grid grid-cols-3 gap-3">
-        <StatCard label="완료" value={`${completedCount}/${MAX_LEVEL}`} />
-        <StatCard label="열린 길" value={`Lv.${progress.highestUnlockedLevel}`} />
-        <StatCard label="진도" value={`${progressPercent}%`} />
-      </div>
-
-      <WorldShelf progress={progress} />
-
-      <div className="mt-5 rounded-[1.6rem] bg-white/80 p-5 shadow-lg backdrop-blur">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-xl font-black text-slate-900">최근 기록</h3>
-          <Sparkles className="h-6 w-6 text-amber-400" />
-        </div>
-        {recentAttempt ? (
-          <p className="text-base font-bold leading-relaxed text-slate-600">
-            Lv. {recentAttempt.level}에서 {recentAttempt.score}/
-            {recentAttempt.total}개를 맞혔어요.{" "}
-            {recentAttempt.canAdvance
-              ? "다음 숲길이 열렸어요."
-              : "같은 길을 한 번 더 걸어볼 차례예요."}
-          </p>
-        ) : (
-          <p className="text-base font-bold leading-relaxed text-slate-600">
-            아직 기록이 없어요. 첫 숲길을 걸으면 여기에 작은 성취가 쌓여요.
-          </p>
-        )}
+        <WorldPreviewRail progress={progress} />
       </div>
     </section>
   );
 }
 
-function WorldShelf({ progress }) {
+function TodayPanel({
+  currentLevelMeta,
+  onOpenMap,
+  onStart,
+  onStartPlacement,
+  progress
+}) {
   return (
-    <section className="mt-5 space-y-4">
+    <Card className="space-y-5" padding="lg" variant="command">
+      <div className="rounded-card bg-gradient-to-br from-emerald-100 via-lime-100 to-sky-100 p-5">
+        <div className="mb-5 flex flex-wrap items-center gap-3">
+          <Badge className="bg-white px-4 py-2 text-lg" tone="brand">
+            {progress.placementCompleted
+              ? `이어하기 Lv. ${progress.currentLevel}`
+              : "처음이라면 진단부터"}
+          </Badge>
+          <Badge className="bg-brand-500 text-white" tone="brand">
+            {QUESTION_COUNT}문제
+          </Badge>
+        </div>
+        <p className="mb-2 text-sm font-black text-brand-700">오늘의 추천</p>
+        <h2 className="font-display text-3xl font-black text-slate-950">
+          {currentLevelMeta.title}
+        </h2>
+        <p className="mt-3 text-lg font-bold leading-relaxed text-slate-600">
+          {progress.placementCompleted
+            ? `${currentLevelMeta.focus}을 게임처럼 톡톡 풀어봐요.`
+            : "짧은 맞춤 찾기로 지금 맞는 숲길을 찾아요."}{" "}
+          학교 단계는 숨기고, 지금 필요한 숫자 감각만 키워요.
+        </p>
+      </div>
+
+      <Button
+        iconRight={<Play className="h-7 w-7 fill-white" />}
+        onClick={onStart}
+        size="xl"
+      >
+        {progress.placementCompleted ? "이어서 시작하기" : "Lv.1부터 시작하기"}
+      </Button>
+
+      {!progress.placementCompleted && (
+        <Button
+          iconRight={<Sparkles className="h-6 w-6" />}
+          onClick={onStartPlacement}
+          tone="warm"
+          variant="primary"
+        >
+          1분 맞춤 찾기
+        </Button>
+      )}
+
+      <Button
+        iconRight={<Map className="h-6 w-6" />}
+        onClick={onOpenMap}
+        tone="neutral"
+        variant="secondary"
+      >
+        숲길 지도 보기
+      </Button>
+    </Card>
+  );
+}
+
+function RecentRecord({ recentAttempt }) {
+  return (
+    <Card className="mt-5" padding="md" variant="plain">
+      <div className="mb-3 flex items-center justify-between">
+        <h3 className="text-xl font-black text-slate-900">최근 기록</h3>
+        <Sparkles className="h-6 w-6 text-warning-500" />
+      </div>
+      {recentAttempt ? (
+        <p className="text-base font-bold leading-relaxed text-slate-600">
+          Lv. {recentAttempt.level}에서 {recentAttempt.score}/
+          {recentAttempt.total}개를 맞혔어요.{" "}
+          {recentAttempt.canAdvance
+            ? "다음 숲길이 열렸어요."
+            : "같은 길을 한 번 더 걸어볼 차례예요."}
+        </p>
+      ) : (
+        <p className="text-base font-bold leading-relaxed text-slate-600">
+          아직 기록이 없어요. 첫 숲길을 걸으면 여기에 작은 성취가 쌓여요.
+        </p>
+      )}
+    </Card>
+  );
+}
+
+function AuthPanel({
+  authMessage,
+  authStatus,
+  authUser,
+  isSupabaseConfigured,
+  onSignIn,
+  onSignOut,
+  syncStatus
+}) {
+  const signedIn = Boolean(authUser);
+  const statusLabel = !isSupabaseConfigured
+    ? "이 기기에 안전하게 저장 중"
+    : signedIn
+      ? syncStatus === "synced"
+        ? "계정에 저장 완료"
+        : syncStatus === "syncing"
+          ? "진도를 계정에 연결하는 중"
+          : "이 기기 기록은 안전해요"
+      : "Google로 연결하면 이어할 수 있어요";
+  const helperText = signedIn
+    ? authUser.email || "로그인된 계정"
+    : authStatus === "disabled"
+      ? "Supabase 키를 넣으면 기기 간 이어하기가 켜져요."
+      : "다른 기기에서도 같은 진도로 이어갈 수 있어요.";
+
+  return (
+    <Card className="mt-5" padding="sm" variant="status">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-black text-slate-400">저장 상태</p>
+          <p className="text-lg font-black text-slate-900">{statusLabel}</p>
+          <p className="mt-1 text-sm font-bold text-slate-500">{helperText}</p>
+        </div>
+
+        {signedIn ? (
+          <Button
+            className="w-auto shrink-0"
+            onClick={onSignOut}
+            size="sm"
+            tone="neutral"
+            variant="quiet"
+          >
+            로그아웃
+          </Button>
+        ) : (
+          <Button
+            className="w-auto shrink-0"
+            disabled={!isSupabaseConfigured}
+            onClick={onSignIn}
+            size="sm"
+          >
+            Google로 저장하기
+          </Button>
+        )}
+      </div>
+
+      {authMessage && (
+        <FeedbackPanel
+          className="mt-3 w-full justify-start rounded-control text-sm"
+          message={authMessage}
+          title="저장 안내"
+          tone="sync-error"
+        />
+      )}
+    </Card>
+  );
+}
+
+function WorldPreviewRail({ progress }) {
+  const previewWorlds = ["addition", "shapes", "subtraction"]
+    .map((id) => getWorldById(id))
+    .filter(Boolean);
+
+  return (
+    <section className="mx-auto w-full max-w-md space-y-4 lg:max-w-none">
       <div className="flex items-end justify-between">
         <div>
           <p className="text-sm font-black text-emerald-600">월드 지도</p>
-          <h2 className="text-2xl font-black text-slate-950">숨겨진 수학 왕국</h2>
+          <h2 className="font-display text-2xl font-black text-slate-950">
+            오늘 열어볼 수학 왕국
+          </h2>
         </div>
-        <span className="rounded-full bg-white/80 px-3 py-2 text-xs font-black text-slate-500 shadow-sm">
-          무학년제
-        </span>
+        <Badge>단계 숨김</Badge>
       </div>
 
-      {WORLD_CATEGORIES.map((category) => {
-        const worlds = WORLD_CATALOG.filter(
-          (world) => world.categoryId === category.id
-        );
-
-        return (
-          <div
-            className="rounded-[1.6rem] bg-white/70 p-4 shadow-lg backdrop-blur"
-            key={category.id}
-          >
-            <div className="mb-3">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="text-xl font-black text-slate-900">
-                  {category.title}
-                </h3>
-                <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-black text-emerald-700">
-                  {category.share}
-                </span>
-              </div>
-              <p className="mt-1 text-sm font-bold leading-relaxed text-slate-500">
-                {category.description}
-              </p>
-            </div>
-
-            <div className="grid gap-3">
-              {worlds.map((world) => (
-                <WorldCard
-                  key={world.id}
-                  progress={progress}
-                  world={world}
-                />
-              ))}
-            </div>
+      <Card className="space-y-3 bg-white/70" padding="sm" variant="plain">
+        <div>
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-xl font-black text-slate-900">추천 월드</h3>
+            <Badge tone="brand">짧게 보기</Badge>
           </div>
-        );
-      })}
+          <p className="mt-1 text-sm font-bold leading-relaxed text-slate-500">
+            전체 커리큘럼은 유지하되, 홈에서는 지금 필요한 길만 먼저 보여줘요.
+          </p>
+        </div>
+
+        <div className="grid gap-3">
+          {previewWorlds.map((world) => (
+            <WorldCard key={world.id} progress={progress} world={world} />
+          ))}
+        </div>
+      </Card>
     </section>
   );
 }
@@ -426,14 +670,11 @@ function WorldCard({ progress, world }) {
       : "잠김";
 
   return (
-    <div
-      className={`rounded-[1.3rem] border-2 p-4 shadow-sm ${
-        isOpen
-          ? "border-emerald-200 bg-emerald-50"
-          : isBonusOpen
-            ? "border-sky-200 bg-sky-50"
-            : "border-slate-100 bg-white/80 opacity-75"
-      }`}
+    <Card
+      className="rounded-[1.3rem] border-2"
+      padding="sm"
+      tone={isOpen ? "success" : isBonusOpen ? "sky" : "locked"}
+      variant="world"
     >
       <div className="flex items-start gap-3">
         <div
@@ -453,28 +694,27 @@ function WorldCard({ progress, world }) {
             <h4 className="truncate text-lg font-black text-slate-900">
               {world.title}
             </h4>
-            <span
-              className={`shrink-0 rounded-full px-3 py-1 text-xs font-black ${
-                isLocked
-                  ? "bg-slate-100 text-slate-500"
-                  : isBonusOpen
-                    ? "bg-sky-100 text-sky-700"
-                    : "bg-emerald-100 text-emerald-700"
-              }`}
-            >
+            <Badge tone={isLocked ? "locked" : isBonusOpen ? "neutral" : "brand"}>
               {badge}
-            </span>
+            </Badge>
           </div>
 
           <p className="text-sm font-bold leading-relaxed text-slate-600">
             {world.summary}
           </p>
-          <p className="mt-2 text-xs font-black text-slate-400">
-            {world.unlockHint} · 총 {world.levelCount}개 길
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Badge>핵심 {world.stageCount}단계</Badge>
+            <Badge>앱 {world.levelCount}레벨</Badge>
+          </div>
+          <p className="mt-2 text-xs font-black leading-relaxed text-slate-400">
+            {world.unlockHint} · {world.interactionMode}
+          </p>
+          <p className="mt-2 text-xs font-bold leading-relaxed text-slate-500">
+            {world.keyLeap}
           </p>
         </div>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -482,13 +722,13 @@ function SkillMapView({ onBack, onStartLevel, progress }) {
   return (
     <section className="relative mx-auto min-h-screen w-full max-w-md px-5 py-6">
       <header className="mb-5 flex items-center justify-between">
-        <button
-          className="flex h-12 w-12 items-center justify-center rounded-2xl bg-white/90 text-slate-600 shadow-md transition active:scale-95"
+        <IconButton
+          ariaLabel="홈으로 돌아가기"
           onClick={onBack}
-          type="button"
+          variant="default"
         >
           <ArrowLeft className="h-6 w-6" />
-        </button>
+        </IconButton>
         <div className="text-center">
           <p className="text-xs font-black uppercase tracking-[0.24em] text-emerald-600">
             Skill Tree
@@ -500,12 +740,12 @@ function SkillMapView({ onBack, onStartLevel, progress }) {
         </div>
       </header>
 
-      <div className="mb-5 rounded-[1.6rem] bg-white/84 p-4 shadow-lg backdrop-blur">
+      <Card className="mb-5" padding="sm" variant="status">
         <p className="text-sm font-black text-slate-400">현재 추천</p>
         <p className="text-2xl font-black text-slate-900">
           Lv. {progress.currentLevel} · {getLevelMeta(progress.currentLevel).title}
         </p>
-      </div>
+      </Card>
 
       <div className="relative pb-10">
         <div className="absolute left-12 top-4 h-[calc(100%-4rem)] w-3 rounded-full bg-white/70 shadow-inner" />
@@ -584,66 +824,53 @@ function QuizView({
   return (
     <section className="relative mx-auto flex min-h-screen w-full max-w-md flex-col px-5 py-6">
       <header className="flex items-center gap-4 pt-2">
-        <button
-          aria-label="홈으로 돌아가기"
-          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/90 text-slate-500 shadow-md transition hover:text-slate-700 active:scale-95"
+        <IconButton
+          ariaLabel="홈으로 돌아가기"
           onClick={onExit}
-          type="button"
+          variant="default"
         >
           <X className="h-7 w-7" />
-        </button>
+        </IconButton>
 
-        <div className="h-5 flex-1 overflow-hidden rounded-full bg-white/80 shadow-inner">
-          <div
-            className="h-full rounded-full bg-gradient-to-r from-lime-400 to-emerald-500 transition-all duration-500 ease-out"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
+        <ProgressBar label="퀴즈 진행률" value={progress} />
 
-        <span className="rounded-2xl bg-white/90 px-3 py-2 text-sm font-black text-emerald-700 shadow-md">
+        <Badge className="bg-white/90 px-3 py-2 shadow-soft" tone="brand">
           {currentIndex + 1}/{questionCount}
-        </span>
+        </Badge>
       </header>
 
       <div className="flex flex-1 flex-col justify-center pb-8 pt-10">
         <div className="mb-8 flex justify-center">
-          <div className="rounded-full bg-white/80 px-5 py-2 text-base font-black text-emerald-700 shadow-sm">
+          <Badge className="px-5 py-2 text-base shadow-soft" tone="brand">
             {question.prompt}
-          </div>
+          </Badge>
         </div>
 
-        <div className="rounded-[2rem] border-4 border-white bg-white/78 p-8 text-center shadow-jelly backdrop-blur">
+        <Card className="text-center" padding="lg" variant="elevated">
           <p className="mb-5 text-lg font-black text-slate-400">
             {mode === "placement"
               ? "맞춤 숲길 찾기"
               : `${ADDITION_PATH.title} Lv. ${activeLevel}`}
           </p>
-          <h2 className="text-6xl font-black tracking-tight text-slate-900">
+          <h2 className="font-display text-6xl font-black tracking-tight text-slate-900">
             {question.question}
           </h2>
-        </div>
+        </Card>
 
         <div className="mt-5 min-h-12 text-center">
           {answered && (
-            <div
-              className={`inline-flex items-center gap-2 rounded-full px-5 py-3 text-lg font-black shadow-md ${
-                isCorrect
-                  ? "bg-emerald-100 text-emerald-700"
-                  : "bg-rose-100 text-rose-700"
-              }`}
-            >
-              {isCorrect ? (
-                <>
+            <FeedbackPanel
+              icon={
+                isCorrect ? (
                   <Check className="h-6 w-6" />
-                  좋아요, 정답!
-                </>
-              ) : (
-                <>
+                ) : (
                   <X className="h-6 w-6" />
-                  괜찮아요, 정답을 확인해요
-                </>
-              )}
-            </div>
+                )
+              }
+              message={isCorrect ? "" : "초록 조각을 보고 다음에 비교해요."}
+              title={isCorrect ? "좋아요, 정답!" : "괜찮아요, 정답을 확인해요"}
+              tone={isCorrect ? "success" : "repair"}
+            />
           )}
         </div>
       </div>
@@ -653,44 +880,26 @@ function QuizView({
           const selected = selectedOption === option;
           const shouldRevealCorrect =
             answered && option === question.correctAnswer && !selected;
-
-          let buttonStyle =
-            "border-slate-200 bg-white text-slate-800 hover:-translate-y-0.5 hover:bg-slate-50";
-          let icon = null;
+          let choiceState = "idle";
 
           if (selected && isCorrect) {
-            buttonStyle =
-              "border-emerald-600 bg-emerald-100 text-emerald-800 ring-4 ring-emerald-300";
-            icon = (
-              <Check className="absolute right-4 top-4 h-7 w-7 text-emerald-600" />
-            );
+            choiceState = "correct";
           } else if (selected && !isCorrect) {
-            buttonStyle =
-              "animate-shake border-rose-600 bg-rose-100 text-rose-800 ring-4 ring-rose-300";
-            icon = <X className="absolute right-4 top-4 h-7 w-7 text-rose-600" />;
+            choiceState = "incorrect";
           } else if (shouldRevealCorrect) {
-            buttonStyle =
-              "border-emerald-600 bg-emerald-100 text-emerald-800 opacity-80";
-            icon = (
-              <Check className="absolute right-4 top-4 h-7 w-7 text-emerald-600" />
-            );
+            choiceState = "revealed-correct";
           } else if (answered) {
-            buttonStyle = "border-slate-100 bg-white/80 text-slate-400 opacity-60";
+            choiceState = "disabled";
           }
 
           return (
-            <button
-              className={`relative flex min-h-32 items-center justify-center rounded-[1.7rem] border-b-[7px] px-5 py-8 text-5xl font-black shadow-lg transition-all duration-150 ${
-                answered ? "" : "active:translate-y-1 active:border-b-2 active:scale-95"
-              } ${buttonStyle}`}
+            <QuizChoice
               disabled={answered}
               key={`${question.id}-${option}-${index}`}
-              onClick={() => onSelectOption(option)}
-              type="button"
-            >
-              {option}
-              {icon}
-            </button>
+              onSelect={onSelectOption}
+              state={choiceState}
+              value={option}
+            />
           );
         })}
       </div>

@@ -25,6 +25,7 @@
 
 - `id`
 - `user_id`
+- `client_attempt_id`
 - `path`: `addition`
 - `level`
 - `skill_id`
