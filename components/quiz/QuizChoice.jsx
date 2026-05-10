@@ -9,7 +9,7 @@ const stateClasses = {
   correct:
     "border-success-600 bg-success-100 text-success-800 ring-4 ring-success-300 shadow-control",
   incorrect:
-    "animate-shake border-danger-600 bg-danger-100 text-danger-800 ring-4 ring-danger-300 shadow-control",
+    "motion-safe:animate-shake border-danger-600 bg-danger-100 text-danger-800 ring-4 ring-danger-300 shadow-control",
   "revealed-correct":
     "border-success-600 bg-success-100 text-success-800 opacity-90 shadow-control",
   disabled: "border-neutral-100 bg-white/80 text-neutral-400 opacity-60 shadow-soft"
@@ -27,7 +27,7 @@ export function QuizChoice({
 
   return (
     <button
-      aria-label={`${value} 선택지`}
+      aria-label={`${value} 선택지, ${getStateLabel(finalState)}`}
       className={cx(
         "relative flex min-h-32 items-center justify-center rounded-choice border-b-[7px] px-5 py-8 text-5xl font-black transition-all duration-fast motion-safe:active:translate-y-1 motion-safe:active:scale-95 motion-safe:active:border-b-2",
         focusRing,
@@ -46,3 +46,11 @@ export function QuizChoice({
   );
 }
 
+function getStateLabel(state) {
+  if (state === "correct") return "정답";
+  if (state === "incorrect") return "선택한 오답";
+  if (state === "revealed-correct") return "정답 보기";
+  if (state === "disabled") return "비활성";
+  if (state === "selected") return "선택됨";
+  return "선택 가능";
+}
